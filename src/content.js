@@ -5275,6 +5275,9 @@
     if (entries.length === 0) {
       return { ok: false, reason: "资料库为空：请先在设置页导入或填写资料，再使用从本页学习。" };
     }
+    // 先清掉上一次填写/学习留下的标记，让页面只显示本次结果，
+    // 避免旧橙标残留让人误以为更新没生效。
+    clearMarks();
     const scan = await scanForm();
     const hostname = scan?.hostname || location.hostname || "";
     const totals = countScanFieldOccurrences(scan);
