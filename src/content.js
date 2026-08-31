@@ -5352,6 +5352,7 @@
       ok: true,
       learned: learned.length,
       ambiguousCount: ambiguous.length,
+      ambiguousLabels: ambiguous.slice(0, 5),
       notInProfileCount: new Set(notInProfile).size,
       notInProfileLabels: Array.from(new Set(notInProfile)).slice(0, 8),
       skippedRepeat,
