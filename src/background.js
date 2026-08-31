@@ -25,8 +25,93 @@ const DEFAULT_PROFILE_V2 = {
 const STORAGE_KEYS = {
   profileV2: "profileV2",
   apiConfig: "apiConfig",
-  updateState: "updateState"
+  updateState: "updateState",
+  fieldMemoryV1: "fieldMemoryV1"
 };
+
+const MAX_FIELD_MEMORY_ENTRIES = 500;
+
+function createDefaultFieldMemory() {
+  return { enabled: true, entries: {} };
+}
+
+async function getFieldMemory() {
+  const values = await chrome.storage.local.get([STORAGE_KEYS.fieldMemoryV1]);
+  const store = values[STORAGE_KEYS.fieldMemoryV1];
+  if (!store || typeof store !== "object" || !store.entries || typeof store.entries !== "object") {
+    return createDefaultFieldMemory();
+  }
+  return { enabled: store.enabled !== false, entries: store.entries };
+}
+
+async function saveFieldMemory(store) {
+  await chrome.storage.local.set({ [STORAGE_KEYS.fieldMemoryV1]: store });
+}
+
+async function recordFieldMemory(payload = {}) {
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const store = await getFieldMemory();
+  if (!store.enabled) {
+    return store;
+  }
+  const now = Date.now();
+  for (const item of items) {
+    const key = normalizeMemoryKey(item?.key);
+    const sourcePath = typeof item?.sourcePath === "string" ? item.sourcePath : "";
+    if (!key || !sourcePath) {
+      continue;
+    }
+    const previous = store.entries[key];
+    store.entries[key] = {
+      key,
+      sourcePath,
+      fieldLabel: String(item.fieldLabel || key).slice(0, 80),
+      sourceLabel: String(item.sourceLabel || "").slice(0, 120),
+      hostname: String(item.hostname || "").slice(0, 120),
+      mappingSource: String(item.mappingSource || "").slice(0, 40),
+      hits: Number.isFinite(previous?.hits) ? previous.hits + 1 : 1,
+      updatedAt: now
+    };
+  }
+  const keys = Object.keys(store.entries);
+  if (keys.length > MAX_FIELD_MEMORY_ENTRIES) {
+    keys
+      .sort((a, b) => (store.entries[a].updatedAt || 0) - (store.entries[b].updatedAt || 0))
+      .slice(0, keys.length - MAX_FIELD_MEMORY_ENTRIES)
+      .forEach((staleKey) => {
+        delete store.entries[staleKey];
+      });
+  }
+  await saveFieldMemory(store);
+  return store;
+}
+
+async function deleteFieldMemory(payload = {}) {
+  const store = await getFieldMemory();
+  const key = normalizeMemoryKey(payload?.key);
+  if (key) {
+    delete store.entries[key];
+  }
+  await saveFieldMemory(store);
+  return store;
+}
+
+async function clearFieldMemory() {
+  const store = createDefaultFieldMemory();
+  await saveFieldMemory(store);
+  return store;
+}
+
+async function setFieldMemoryEnabled(payload = {}) {
+  const store = await getFieldMemory();
+  store.enabled = Boolean(payload.enabled);
+  await saveFieldMemory(store);
+  return store;
+}
+
+function normalizeMemoryKey(value) {
+  return String(value || "").trim().slice(0, 160);
+}
 
 const PROFILE_PANEL_STATE_KEY = "OJAF_PROFILE_PANEL_STATE";
 const MAX_PROFILE_PANEL_STATE_ITEMS = 20;
@@ -118,6 +203,16 @@ async function handleMessage(message) {
       return listModels(message.payload || {});
     case "OJAF_TEST_CONNECTION":
       return testApi(message.payload || {});
+    case "OJAF_GET_FIELD_MEMORY":
+      return getFieldMemory();
+    case "OJAF_RECORD_FIELD_MEMORY":
+      return recordFieldMemory(message.payload || {});
+    case "OJAF_DELETE_FIELD_MEMORY":
+      return deleteFieldMemory(message.payload || {});
+    case "OJAF_CLEAR_FIELD_MEMORY":
+      return clearFieldMemory();
+    case "OJAF_SET_FIELD_MEMORY_ENABLED":
+      return setFieldMemoryEnabled(message.payload || {});
     case "OJAF_GET_UPDATE_STATUS":
       return getUpdateState();
     case "OJAF_CHECK_FOR_UPDATE":

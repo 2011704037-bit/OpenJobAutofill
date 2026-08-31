@@ -5130,6 +5130,236 @@
     return Number(rightCandidate.score || 0) - Number(leftCandidate.score || 0);
   }
 
+  // ===== 字段记忆（本地增强）：记住“页面字段 → 资料字段”的成功映射，下次直接回填 =====
+  // 隐私边界与项目一致：只存字段名与资料字段路径，不存任何资料值。
+
+  async function loadFieldMemoryStore() {
+    try {
+      const store = await sendRuntimeMessage({ type: "OJAF_GET_FIELD_MEMORY" });
+      if (!store || typeof store !== "object" || !store.entries || typeof store.entries !== "object") {
+        return null;
+      }
+      return store;
+    } catch {
+      return null;
+    }
+  }
+
+  function buildFieldMemoryKey(fieldLabel, fieldCategory) {
+    const labelKey = normalizeMatchKey(fieldLabel);
+    if (!labelKey) {
+      return "";
+    }
+    return `${fieldCategory || "未分类"}|${labelKey}`;
+  }
+
+  function countScanFieldOccurrences(scan) {
+    const totals = new Map();
+    for (const field of (Array.isArray(scan?.fields) ? scan.fields : [])) {
+      if (!field?.canFill) {
+        continue;
+      }
+      const label = field.inferredLabel || inferFieldLabel(field);
+      const category = field.inferredCategory || inferMatchSection(field);
+      const key = buildFieldMemoryKey(label, category) || `${field.fieldId}`;
+      totals.set(key, (totals.get(key) || 0) + 1);
+    }
+    return totals;
+  }
+
+  // 只在本页同名标签唯一时才使用/写入记忆，避免“学校/开始时间”这类多实例字段被错误复用。
+  async function mergeFieldMemoryIntoPlan(plan) {
+    if (!plan || !Array.isArray(plan.candidates) || !Array.isArray(plan.scan?.fields)) {
+      return plan;
+    }
+    const memoryStore = await loadFieldMemoryStore();
+    if (!memoryStore || memoryStore.enabled === false || Object.keys(memoryStore.entries).length === 0) {
+      return plan;
+    }
+    const totals = countScanFieldOccurrences(plan.scan);
+    const matchedFieldIds = new Set(plan.candidates.map((candidate) => candidate?.fieldId).filter(Boolean));
+    const entries = Array.isArray(plan.entries) ? plan.entries : getCurrentProfileEntries();
+    const memoryCandidates = [];
+
+    for (const field of plan.scan.fields) {
+      if (!field?.canFill || matchedFieldIds.has(field.fieldId)) {
+        continue;
+      }
+      const fieldLabel = field.inferredLabel || inferFieldLabel(field);
+      const fieldCategory = field.inferredCategory || inferMatchSection(field);
+      const key = buildFieldMemoryKey(fieldLabel, fieldCategory);
+      if (!key || (totals.get(key) || 0) > 1) {
+        continue;
+      }
+      const record = memoryStore.entries[key];
+      if (!record?.sourcePath) {
+        continue;
+      }
+      const candidate = createAiAutofillCandidate(
+        {
+          fieldId: field.fieldId,
+          sourcePath: record.sourcePath,
+          confidence: 0.95,
+          reason: `字段记忆：曾在 ${record.hostname || "之前的页面"} 匹配成功`
+        },
+        plan.scan,
+        entries
+      );
+      if (!candidate) {
+        continue;
+      }
+      candidate.mappingSource = "字段记忆";
+      memoryCandidates.push(candidate);
+    }
+
+    if (memoryCandidates.length === 0) {
+      return plan;
+    }
+
+    const candidates = [...plan.candidates, ...memoryCandidates].sort(compareAutofillCandidates);
+    const autoFillIds = new Set(plan.autoFillIds || []);
+    for (const candidate of memoryCandidates) {
+      if (candidate.shouldAutoFill) {
+        autoFillIds.add(candidate.id);
+      }
+    }
+    return {
+      ...plan,
+      candidates,
+      autoFillIds,
+      memoryCount: memoryCandidates.length
+    };
+  }
+
+  async function recordFieldMemoryFromFillResults(plan, filledCandidates, results) {
+    try {
+      const items = [];
+      const byId = new Map((filledCandidates || []).map((candidate) => [candidate?.id, candidate]));
+      const totals = countScanFieldOccurrences(plan?.scan);
+      const hostname = plan?.page?.hostname || location.hostname || "";
+      for (const result of (results || [])) {
+        if (!result?.ok) {
+          continue;
+        }
+        const candidate = byId.get(result.id);
+        if (!candidate?.sourceItemId || !candidate.fieldLabel) {
+          continue;
+        }
+        const key = buildFieldMemoryKey(candidate.fieldLabel, candidate.fieldCategory);
+        if (!key || (totals.get(key) || 0) > 1) {
+          continue;
+        }
+        items.push({
+          key,
+          sourcePath: candidate.sourceItemId,
+          fieldLabel: candidate.fieldLabel,
+          sourceLabel: candidate.sourceLabel || "",
+          hostname,
+          mappingSource: candidate.mappingSource || ""
+        });
+      }
+      if (items.length === 0) {
+        return 0;
+      }
+      await sendRuntimeMessage({ type: "OJAF_RECORD_FIELD_MEMORY", payload: { items } });
+      return items.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  // 从本页学习：用户手动填好的字段，反查资料库，把“字段标签 → 资料字段”写进记忆。
+  async function learnFromPage() {
+    await refreshCurrentProfile({ force: true });
+    const entries = getCurrentProfileEntries().filter((entry) => entry?.hasValue);
+    if (entries.length === 0) {
+      return { ok: false, reason: "资料库为空：请先在设置页导入或填写资料，再使用从本页学习。" };
+    }
+    const scan = await scanForm();
+    const hostname = scan?.hostname || location.hostname || "";
+    const totals = countScanFieldOccurrences(scan);
+    const fields = (Array.isArray(scan?.fields) ? scan.fields : []).filter((field) => field?.canFill && field?.hasCurrentValue);
+    const learned = [];
+    const ambiguous = [];
+    const notInProfile = [];
+    let skippedRepeat = 0;
+
+    for (const field of fields) {
+      const fieldLabel = field.inferredLabel || inferFieldLabel(field);
+      const fieldCategory = field.inferredCategory || inferMatchSection(field);
+      const key = buildFieldMemoryKey(fieldLabel, fieldCategory);
+      if (!key || (totals.get(key) || 0) > 1) {
+        skippedRepeat += 1;
+        continue;
+      }
+      const sensitiveText = compactText([fieldLabel, field.placeholder, field.name, field.id].join(" "));
+      if (/上传|附件|照片|证件照|简历附件|密码/.test(sensitiveText)) {
+        continue;
+      }
+
+      const valueMatches = entries.filter((entry) => valuesLookEquivalent(field.currentValue, entry.value));
+      if (valueMatches.length === 0) {
+        notInProfile.push(fieldLabel || field.fieldId);
+        continue;
+      }
+
+      let chosen = valueMatches[0];
+      if (valueMatches.length > 1) {
+        let bestScore = -9999;
+        for (const entry of valueMatches) {
+          const score = scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory);
+          if (score > bestScore) {
+            bestScore = score;
+            chosen = entry;
+          }
+        }
+        if (bestScore < 18) {
+          ambiguous.push(fieldLabel || field.fieldId);
+          continue;
+        }
+      }
+
+      learned.push({
+        key,
+        sourcePath: chosen.itemId,
+        fieldLabel: fieldLabel || key,
+        sourceLabel: chosen.label || "",
+        hostname,
+        mappingSource: "从本页学习"
+      });
+      const element = await resolveFieldElement(field);
+      if (element) {
+        markElement(element, "filled", `已学习: ${fieldLabel || ""} → ${chosen.label || ""}`);
+      }
+    }
+
+    if (learned.length === 0) {
+      return {
+        ok: true,
+        learned: 0,
+        ambiguousCount: ambiguous.length,
+        ambiguousLabels: ambiguous.slice(0, 5),
+        notInProfileCount: new Set(notInProfile).size,
+        notInProfileLabels: Array.from(new Set(notInProfile)).slice(0, 8),
+        skippedRepeat,
+        scannedWithValue: fields.length,
+        message: "没有学到新映射：页面上有值的字段要么已重复学习，要么值不在资料库里。"
+      };
+    }
+
+    await sendRuntimeMessage({ type: "OJAF_RECORD_FIELD_MEMORY", payload: { items: learned } });
+    return {
+      ok: true,
+      learned: learned.length,
+      ambiguousCount: ambiguous.length,
+      notInProfileCount: new Set(notInProfile).size,
+      notInProfileLabels: Array.from(new Set(notInProfile)).slice(0, 8),
+      skippedRepeat,
+      scannedWithValue: fields.length,
+      message: `已学习 ${learned.length} 条字段映射。`
+    };
+  }
+
   function buildAutofillPlan(scan) {
     const entries = getCurrentProfileEntries();
     const visibleFields = Array.isArray(scan?.fields) ? scan.fields.filter((field) => field && field.canFill) : [];
@@ -5429,15 +5659,18 @@
         };
       }
 
+      plan = await mergeFieldMemoryIntoPlan(plan);
+      const memoryNote = plan.memoryCount > 0 ? `，字段记忆补齐 ${plan.memoryCount} 项` : "";
+
       const aiUsage = getAutofillAiSnapshot();
       const aiStatus = aiUsage.message;
-      setAutofillProgress("整理匹配结果", 90, `${buildPlanMatchSummary(plan)}，共匹配 ${plan.candidates.length} 项`);
+      setAutofillProgress("整理匹配结果", 90, `${buildPlanMatchSummary(plan)}，共匹配 ${plan.candidates.length} 项${memoryNote}`);
       updateAutofillDebugPlan(plan, { aiStatus, aiUsage });
 
       const autoFillCount = plan.autoFillIds.size;
       setProfilePanelStatus(
         plan.candidates.length > 0
-          ? `${aiStatus} ${buildPlanMatchSummary(plan)}，共匹配 ${plan.candidates.length} 项，将自动填写 ${autoFillCount} 项。`
+          ? `${aiStatus} ${buildPlanMatchSummary(plan)}，共匹配 ${plan.candidates.length} 项，将自动填写 ${autoFillCount} 项${memoryNote}。`
           : `${aiStatus} 没有找到可自动匹配的字段。`
       );
       setAutofillProgress("匹配完成", 90, `${buildPlanMatchSummary(plan)}，准备自动填写当前网页`);
@@ -5596,6 +5829,7 @@
 
     const filledCount = results.filter((result) => result.ok).length;
     const failedCount = results.length - filledCount;
+    void recordFieldMemoryFromFillResults(plan, autoFillCandidates, results);
     const skippedCount = await markDeferredPlanCandidates(plan, autoFillSet);
     const summary = {
       attempted: results.length,
@@ -6578,6 +6812,10 @@
 
     if (message.type === "OJAF_START_AUTOFILL") {
       return runOneClickAutofill();
+    }
+
+    if (message.type === "OJAF_LEARN_FROM_PAGE") {
+      return learnFromPage();
     }
 
     if (message.type === "OJAF_GET_RUNTIME_STATE") {

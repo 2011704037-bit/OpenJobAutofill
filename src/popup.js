@@ -2,6 +2,7 @@ const els = {
   status: document.getElementById("status"),
   openOptions: document.getElementById("openOptions"),
   startAutofillBtn: document.getElementById("startAutofillBtn"),
+  learnFromPageBtn: document.getElementById("learnFromPageBtn"),
   showProfilePanelBtn: document.getElementById("showProfilePanelBtn"),
   clearMarksBtn: document.getElementById("clearMarksBtn"),
   updateStatus: document.getElementById("updateStatus"),
@@ -15,6 +16,9 @@ const DEFAULT_CHECK_UPDATE_LABEL = els.checkUpdateBtn.textContent;
 els.openOptions.addEventListener("click", () => chrome.runtime.openOptionsPage());
 els.startAutofillBtn.addEventListener("click", () => {
   void startAutofill();
+});
+els.learnFromPageBtn?.addEventListener("click", () => {
+  void learnFromPage();
 });
 els.showProfilePanelBtn.addEventListener("click", () => {
   void showProfilePanel();
@@ -114,6 +118,40 @@ async function startAutofill() {
   } catch (error) {
     setStatus(`开始填写失败：${error.message}`, true);
     await syncRuntimeState({ updateStatus: false });
+  }
+}
+
+async function learnFromPage() {
+  const defaultLabel = els.learnFromPageBtn.textContent;
+  els.learnFromPageBtn.disabled = true;
+  els.learnFromPageBtn.textContent = "学习中...";
+  try {
+    const response = await sendToActiveTab({ type: "OJAF_LEARN_FROM_PAGE" });
+    const data = response?.data || {};
+    if (!data.ok) {
+      setStatus(data.reason || "从本页学习未完成。", true);
+      return;
+    }
+    const parts = [];
+    if (data.learned > 0) {
+      parts.push(`已学习 ${data.learned} 条映射（页面绿色标记 = 已学会的字段），下次遇到同名字段会自动填。`);
+    } else {
+      parts.push("没有学到新映射：页面上有值的字段要么重复出现被跳过，要么值不在资料库里。");
+    }
+    if (data.notInProfileCount > 0) {
+      const labels = (data.notInProfileLabels || []).join("、");
+      parts.push(`有 ${data.notInProfileCount} 个字段的值在资料库找不到（如 ${labels}）——把它们补进设置页资料库，学一次以后就能自动填。`);
+    }
+    if (data.ambiguousCount > 0) {
+      const labels = (data.ambiguousLabels || []).join("、");
+      parts.push(`${data.ambiguousCount} 个字段值匹配到多条资料无法确定（如 ${labels}），已跳过。`);
+    }
+    setStatus(parts.join(" "));
+  } catch (error) {
+    setStatus(`从本页学习失败：${error.message}`, true);
+  } finally {
+    els.learnFromPageBtn.disabled = false;
+    els.learnFromPageBtn.textContent = defaultLabel;
   }
 }
 

@@ -26,6 +26,10 @@ const fields = {
   checkUpdateButton: document.getElementById("checkUpdate"),
   openUpdateButton: document.getElementById("openUpdatePage"),
   updateFeedback: document.getElementById("updateFeedback"),
+  fieldMemoryEnabled: document.getElementById("fieldMemoryEnabled"),
+  fieldMemoryList: document.getElementById("fieldMemoryList"),
+  fieldMemoryFeedback: document.getElementById("fieldMemoryFeedback"),
+  clearFieldMemoryButton: document.getElementById("clearFieldMemory"),
   toast: document.getElementById("toast"),
   status: document.getElementById("status")
 };
@@ -505,6 +509,103 @@ window.addEventListener("resize", scheduleProfileSectionSync);
 
 loadSettings();
 loadUpdateStatus();
+initFieldMemoryCard();
+
+// ===== 字段记忆管理（本机增强） =====
+async function getFieldMemory() {
+  try {
+    return await sendRuntimeMessage({ type: "OJAF_GET_FIELD_MEMORY" });
+  } catch (error) {
+    return { enabled: true, entries: {}, error: error.message };
+  }
+}
+
+function renderFieldMemoryList(store) {
+  if (!fields.fieldMemoryList) {
+    return;
+  }
+  const entries = Object.values(store?.entries || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (entries.length === 0) {
+    fields.fieldMemoryList.innerHTML = `<li class="hint">还没有记忆。第一次自动填写成功后会自动积累。</li>`;
+    return;
+  }
+  fields.fieldMemoryList.innerHTML = entries.slice(0, 100).map((entry) => {
+    const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    return `
+      <li style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(127,127,127,.15);">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(entry.key)}">
+          <strong>${escapeHtml(entry.fieldLabel || entry.key.split("|").pop() || "")}</strong>
+          <span class="hint"> → ${escapeHtml(entry.sourceLabel || entry.sourcePath || "")}</span>
+        </span>
+        <span class="hint" style="white-space:nowrap;">${escapeHtml(entry.hostname || "")} · ${entry.hits || 1} 次 · ${date}</span>
+        <button class="ghost" type="button" data-memory-key="${escapeHtml(entry.key)}">删除</button>
+      </li>`;
+  }).join("");
+}
+
+function setFieldMemoryFeedback(message, isError = false) {
+  if (!fields.fieldMemoryFeedback) {
+    return;
+  }
+  fields.fieldMemoryFeedback.textContent = message;
+  fields.fieldMemoryFeedback.classList.toggle("error", isError);
+}
+
+async function refreshFieldMemoryCard() {
+  const store = await getFieldMemory();
+  if (fields.fieldMemoryEnabled) {
+    fields.fieldMemoryEnabled.checked = store.enabled !== false;
+  }
+  const count = Object.keys(store?.entries || {}).length;
+  setFieldMemoryFeedback(
+    store.error
+      ? `读取字段记忆失败：${store.error}`
+      : store.enabled === false
+        ? `字段记忆已停用，当前保存 ${count} 条（不会被使用）。`
+        : `已启用，当前记住 ${count} 条字段映射。`
+  );
+  renderFieldMemoryList(store);
+}
+
+async function initFieldMemoryCard() {
+  if (!fields.fieldMemoryEnabled && !fields.fieldMemoryList) {
+    return;
+  }
+  fields.fieldMemoryEnabled?.addEventListener("change", async () => {
+    try {
+      await sendRuntimeMessage({ type: "OJAF_SET_FIELD_MEMORY_ENABLED", payload: { enabled: fields.fieldMemoryEnabled.checked } });
+      showToast(fields.fieldMemoryEnabled.checked ? "字段记忆已启用" : "字段记忆已停用");
+      await refreshFieldMemoryCard();
+    } catch (error) {
+      setFieldMemoryFeedback(`设置失败：${error.message}`, true);
+    }
+  });
+  fields.clearFieldMemoryButton?.addEventListener("click", async () => {
+    if (!window.confirm("清空全部字段记忆？此操作不可恢复。")) {
+      return;
+    }
+    try {
+      await sendRuntimeMessage({ type: "OJAF_CLEAR_FIELD_MEMORY" });
+      showToast("字段记忆已清空");
+      await refreshFieldMemoryCard();
+    } catch (error) {
+      setFieldMemoryFeedback(`清空失败：${error.message}`, true);
+    }
+  });
+  fields.fieldMemoryList?.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-memory-key]");
+    if (!button) {
+      return;
+    }
+    try {
+      await sendRuntimeMessage({ type: "OJAF_DELETE_FIELD_MEMORY", payload: { key: button.dataset.memoryKey || "" } });
+      await refreshFieldMemoryCard();
+    } catch (error) {
+      setFieldMemoryFeedback(`删除失败：${error.message}`, true);
+    }
+  });
+  await refreshFieldMemoryCard();
+}
 
 window.addEventListener("beforeunload", (event) => {
   if (!profileHasUnsavedChanges && !apiHasUnsavedChanges) {

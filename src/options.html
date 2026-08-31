@@ -81,6 +81,19 @@
 
       <section class="grid settings-grid">
         <section class="card update-card">
+          <h2>字段记忆（本机增强）</h2>
+          <p class="hint">自动填写成功后，会把“页面字段 → 资料字段”的对应关系记在本机；下次遇到同名字段直接回填，不再依赖 AI。只记字段名和资料字段路径，不记资料值。同页出现多次的字段（如多条教育经历的“学校”）不会使用记忆。</p>
+          <div class="actions">
+            <label style="display:inline-flex;align-items:center;gap:6px;">
+              <input id="fieldMemoryEnabled" type="checkbox" /> 启用字段记忆
+            </label>
+            <button id="clearFieldMemory" class="ghost danger" type="button">清空记忆</button>
+          </div>
+          <p id="fieldMemoryFeedback" class="update-feedback" aria-live="polite">正在读取字段记忆...</p>
+          <ul id="fieldMemoryList" style="list-style:none;margin:8px 0 0;padding:0;max-height:220px;overflow:auto;font-size:12px;"></ul>
+        </section>
+
+        <section class="card update-card">
           <h2>版本更新</h2>
           <p class="hint">插件会定期检查 GitHub Release。发现新版本时，浏览器图标会显示 NEW；更新前建议先导出资料备份。更新时不要卸载扩展，覆盖或重新加载后，本机资料和 API 设置会保留。</p>
           <div class="actions">
