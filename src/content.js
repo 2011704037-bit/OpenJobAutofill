@@ -5305,18 +5305,33 @@
 
       let chosen = valueMatches[0];
       if (valueMatches.length > 1) {
+        // 值全等优先：valuesLookEquivalent 的包含式匹配会让长文本（如自我描述包含姓名）
+        // 混进候选；先按归一化后完全相等筛选，伪匹配直接出局。
+        const exactMatches = valueMatches.filter((entry) => {
+          const left = normalizeComparableValue(field.currentValue);
+          const right = normalizeComparableValue(entry.value);
+          return Boolean(left && right && left === right);
+        });
+        const pool = exactMatches.length > 0 ? exactMatches : valueMatches;
         let bestScore = -9999;
-        for (const entry of valueMatches) {
+        let bestEntry = null;
+        for (const entry of pool) {
           const score = scoreAutofillCandidate(field, entry, fieldLabel, fieldCategory);
           if (score > bestScore) {
             bestScore = score;
-            chosen = entry;
+            bestEntry = entry;
           }
         }
-        if (bestScore < 18) {
+        if (!bestEntry || bestScore <= 0) {
+          // 全部被语义门槛挡住（类别冲突等），宁可不学
           ambiguous.push(fieldLabel || field.fieldId);
           continue;
         }
+        if (pool.length > 1 && bestScore < 18) {
+          ambiguous.push(fieldLabel || field.fieldId);
+          continue;
+        }
+        chosen = bestEntry;
       }
 
       learned.push({
